@@ -65,9 +65,17 @@ class KtiseosNyxPlayer(QWidget):
         self.mute_button.setIconSize(QSize(24, 24))
         self.mute_button.clicked.connect(self.toggle_mute)
         self.mute_button.setToolTip("Mute/Unmute") # Add a tooltip
+        self.mute_button.setFixedWidth(40)
         volume_layout.addWidget(self.mute_button)
 
-        main_layout.addLayout(volume_layout) # Add volume layout
+        # --- Volume Level Label ---
+        self.volume_label = QLabel("100%")  # Initial volume display
+        self.volume_label.setFixedWidth(40)  # Set a fixed width
+        self.volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        volume_layout.addWidget(self.volume_label)
+
+
+        main_layout.addLayout(volume_layout)
 
         button_layout = QHBoxLayout()
         button_layout.addStretch(1)
@@ -428,25 +436,34 @@ class KtiseosNyxPlayer(QWidget):
     def set_volume(self, val):
         # Only store the volume value.  Scaling is done in play_audio.
         self.volume = float(val) / 100.0
+        self.update_volume_display()  # Update the label
         logging.debug(f"Volume set to: {self.volume}")
 
     def toggle_mute(self):
-        if self.current_sound:
-            if self.volume > 0.0:
-                # Mute: Store current volume and set to 0
-                self.previous_volume = self.volume
-                self.volume = 0.0
-                self.volume_slider.setValue(0)  # Update the slider visually
-                self.mute_button.setIcon(qtawesome.icon('mdi.volume-off'))
-                logging.debug("Muted")
-            else:
-                # Unmute: Restore previous volume
-                self.volume = self.previous_volume
-                self.volume_slider.setValue(int(self.volume * 100))  # Update the slider
-                self.mute_button.setIcon(qtawesome.icon('mdi.volume-high'))
-                logging.debug("Unmuted")
-            if self.current_sound.active: #Refresh if playing.
-                self.play_current_track()
+        if self.volume > 0.0:
+            # Mute: Store current volume and set to 0
+            self.previous_volume = self.volume
+            self.volume = 0.0
+            self.volume_slider.setValue(0)  # Update the slider visually
+            self.mute_button.setIcon(qtawesome.icon('mdi.volume-off'))
+            self.mute_button.setToolTip("Unmute")  # Update tooltip
+            logging.debug("Muted")
+        else:
+            # Unmute: Restore previous volume
+            self.volume = self.previous_volume
+            self.volume_slider.setValue(int(self.volume * 100))  # Update the slider
+            self.mute_button.setIcon(qtawesome.icon('mdi.volume-high'))
+            self.mute_button.setToolTip("Mute") # Update tooltip
+            logging.debug("Unmuted")
+        self.update_volume_display()
+        if self.current_sound and self.current_sound.active: #Refresh if playing
+            self.play_current_track()
+
+
+
+    def update_volume_display(self):
+        """Updates the volume label with the current volume percentage."""
+        self.volume_label.setText(f"{int(self.volume * 100)}%")
 
 
     def update_status_label(self):
@@ -521,10 +538,9 @@ def play_audio(self, audio_segment, volume=1.0):
         # --- Normalize to -1.0 to 1.0 (float) ---
         data = data.astype(np.float32) / 32768.0
         # --- Apply Volume ---
-        data *= self.volume # Use the instance volume
+        data *= self.volume  # Use the instance volume
         # --- Clamp and Convert back to int16 ---
         data = np.clip(data * 32767.0, -32768.0, 32767.0).astype(np.int16)
-
 
         stream = sd.OutputStream(
             samplerate=sr,
