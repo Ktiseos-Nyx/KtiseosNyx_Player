@@ -1,20 +1,21 @@
-import asyncio
-import aiofiles
-from pydub import AudioSegment
-import sounddevice as sd
-import soundfile as sf
 import os
 import sys
+import io # For the WIN AND FILE HANDLING! 
+import asyncio
+import aiofiles
+import sounddevice as sd
+import soundfile as sf
 import random
-import io   # For file handling
 import logging
 import numpy as np
+import qtawesome
+from pydub import AudioSegment
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QLabel,
                              QHBoxLayout, QVBoxLayout, QSlider, QFileDialog,
                              QMessageBox, QMenuBar, QMenu)
 from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QIcon, QPixmap, QAction, QKeySequence
-import qtawesome
+
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -490,7 +491,7 @@ class KtiseosNyxPlayer(QWidget):
             raise sd.CallbackStop()
 
         self.current_frame += chunksize
-        #NO VOLUME SCALING HERE
+        #NO VOLUME SCALING
 
 async def load_audio_file_async(file_path):
     logging.debug(f"load_audio_file_async: Loading {file_path}")
@@ -517,8 +518,13 @@ def play_audio(self, audio_segment, volume=1.0):
         channels = audio_segment.channels
         data = samples.reshape(-1, channels)
 
-        # --- Apply volume scaling to the NumPy array *before* creating the stream ---
-        data = (data * self.volume).astype(np.int16)  # Apply volume and keep int16
+        # --- Normalize to -1.0 to 1.0 (float) ---
+        data = data.astype(np.float32) / 32768.0
+        # --- Apply Volume ---
+        data *= self.volume # Use the instance volume
+        # --- Clamp and Convert back to int16 ---
+        data = np.clip(data * 32767.0, -32768.0, 32767.0).astype(np.int16)
+
 
         stream = sd.OutputStream(
             samplerate=sr,
