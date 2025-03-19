@@ -1,21 +1,19 @@
-import os
-import sys
-import io # For the WIN AND FILE HANDLING! 
 import asyncio
 import aiofiles
-import sounddevice as sd
-import soundfile as sf
+from pydub import AudioSegment
+import pyaudio
+import os
+import io # file handling
+import sys
 import random
 import logging
 import numpy as np
-import qtawesome
-from pydub import AudioSegment
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QLabel,
                              QHBoxLayout, QVBoxLayout, QSlider, QFileDialog,
                              QMessageBox, QMenuBar, QMenu)
 from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QIcon, QPixmap, QAction, QKeySequence
-
+import qtawesome
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -34,16 +32,19 @@ class KtiseosNyxPlayer(QWidget):
 
         self.playlist = []
         self.current_track_index = 0
-        self.current_sound = None
+        self.current_sound = None #pyaudio stream
         self.shuffled = False
         self.repeat_mode = "off"
         self.volume = 1.0
-        self.previous_volume = 1.0  # Store previous volume for mute/unmute
+        self.previous_volume = 1.0
         self.audio_cache = {}
-        self.current_data = None
+        self.current_data = None # Holds audio as bytes
         self.current_sr = None
-        self.current_frame = 0 #Keep track of current playback frame
+        self.current_frame = 0 # playback frame
+        self.channels = None # audio channels
+        self.format = None # pyaudio format
 
+        self.p = pyaudio.PyAudio()  # PyAudio instance
         self.init_ui()
         self.create_menu_bar()
 
@@ -61,16 +62,16 @@ class KtiseosNyxPlayer(QWidget):
         volume_layout.addWidget(self.volume_slider)
 
         self.mute_button = QPushButton()
-        self.mute_button.setIcon(qtawesome.icon('mdi.volume-high'))  # Initial icon
+        self.mute_button.setIcon(qtawesome.icon('mdi.volume-high'))
         self.mute_button.setIconSize(QSize(24, 24))
         self.mute_button.clicked.connect(self.toggle_mute)
-        self.mute_button.setToolTip("Mute/Unmute") # Add a tooltip
+        self.mute_button.setToolTip("Mute/Unmute")
         self.mute_button.setFixedWidth(40)
         volume_layout.addWidget(self.mute_button)
 
         # --- Volume Level Label ---
-        self.volume_label = QLabel("100%")  # Initial volume display
-        self.volume_label.setFixedWidth(40)  # Set a fixed width
+        self.volume_label = QLabel("100%")
+        self.volume_label.setFixedWidth(40)
         self.volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         volume_layout.addWidget(self.volume_label)
 
@@ -245,7 +246,7 @@ class KtiseosNyxPlayer(QWidget):
             self.stop()
         self.playlist = []
         self.current_track_index = 0
-        self.audio_cache = {}
+        #self.audio_cache = {} # No longer caching
         self.update_status_label()
         logging.info("Playlist cleared")
 
@@ -297,19 +298,14 @@ class KtiseosNyxPlayer(QWidget):
                 tasks.append(self.add_single_file_async(path))
 
         await asyncio.gather(*tasks)
-        if self.playlist and self.current_sound is None:
-                self.play_current_track()
+        if self.playlist and (self.current_sound is None or not self.current_sound.is_stopped()):
+            self.play_current_track()
+
 
     async def add_single_file_async(self, file_path):
         logging.debug(f"add_single_file_async called with: {file_path}")
         if file_path not in self.playlist:
             try:
-                if file_path not in self.audio_cache:
-                    logging.info(f"Loading {file_path} from disk")
-                    audio = await load_audio_file_async(file_path)
-                    self.audio_cache[file_path] = audio
-                else:
-                    logging.info(f"Loading {file_path} from cache")
                 self.playlist.append(file_path)
                 self.update_status_label()
             except Exception as e:
@@ -356,31 +352,40 @@ class KtiseosNyxPlayer(QWidget):
 
     def play_current_track(self):
         if self.current_sound:
-            self.current_sound.stop()
-            self.current_sound.close()
-            self.current_sound = None
+            self.stop()  # Stop and close any existing stream
 
         if self.playlist:
             if self.current_track_index >= len(self.playlist) or self.current_track_index < 0:
                 self.current_track_index = 0
             try:
-                logging.debug(f"Trying to play from cache: {self.playlist[self.current_track_index]}")
-                audio = self.audio_cache[self.playlist[self.current_track_index]]
-                self.current_sound, self.current_data, self.current_sr = play_audio(self, audio, self.volume)
+                logging.debug(f"Trying to play: {self.playlist[self.current_track_index]}")
+                file_path = self.playlist[self.current_track_index]
+
+                # Load and prepare audio using Pydub (sync part for now)
+                audio = AudioSegment.from_file(file_path)
+                audio = audio.set_sample_width(2)  # 16-bit
+                audio = audio.normalize()
+                self.current_sr = audio.frame_rate
+                self.channels = audio.channels
+                self.format = pyaudio.paInt16
+                # Convert to bytes
+                self.current_data = audio.raw_data
+                self.current_frame = 0
+
+                #Start the stream
+                self.current_sound = self.p.open(format= self.format,
+                                                 channels=self.channels,
+                                                 rate=self.current_sr,
+                                                 output=True,
+                                                 stream_callback=self.audio_callback)
+                self.current_sound.start_stream()
                 self.update_status_label()
                 self.play_pause_button.setIcon(qtawesome.icon('mdi.pause'))
                 self.play_pause_button.setText("Pause")
-                if self.current_sound:
-                    self.current_frame = 0 # Reset playback position
-                    QApplication.processEvents()
 
-            except KeyError:
-                logging.error(f"Cached audio not found for: {self.playlist[self.current_track_index]}")
-                QMessageBox.critical(self,"Error", "Cached audio not found. Try reloading.")
-                self.current_sound = None
-                self.update_status_label()
+
             except Exception as e:
-                logging.exception(f"Error during playback: {e}")
+                logging.exception(f"Error during playback setup: {e}")
                 QMessageBox.critical(self, "Error", f"Error playing file: {e}")
                 self.current_sound = None
                 self.update_status_label()
@@ -389,20 +394,12 @@ class KtiseosNyxPlayer(QWidget):
 
     def play_pause(self):
         if self.current_sound:
-            if self.current_sound.active:
-                self.current_sound.stop()
+            if self.current_sound.is_active():
+                self.current_sound.stop_stream()
                 self.play_pause_button.setIcon(qtawesome.icon('mdi.play'))
                 self.play_pause_button.setText("Play")
             else:
-                #Crucial bit: Recreate the stream
-                self.current_sound = sd.OutputStream(
-                    samplerate=self.current_sr,
-                    channels=self.current_data.shape[1],
-                    callback=self.audio_callback,
-                    blocksize=1024,
-                )
-                self.current_sound.start()
-
+                self.current_sound.start_stream()
                 self.play_pause_button.setIcon(qtawesome.icon('mdi.pause'))
                 self.play_pause_button.setText("Pause")
         elif self.playlist:
@@ -410,15 +407,15 @@ class KtiseosNyxPlayer(QWidget):
 
     def stop(self):
         if self.current_sound:
-            self.current_sound.stop()
+            self.current_sound.stop_stream()
             self.current_sound.close()
             self.current_sound = None
-            self.current_data = None
-            self.current_sr = None
-            self.current_frame = 0
-            self.update_status_label()
-            self.play_pause_button.setIcon(qtawesome.icon('mdi.play'))
-            self.play_pause_button.setText("Play")
+        self.current_data = None
+        self.current_sr = None
+        self.current_frame = 0
+        self.update_status_label()
+        self.play_pause_button.setIcon(qtawesome.icon('mdi.play'))
+        self.play_pause_button.setText("Play")
 
 
     def next_track(self):
@@ -444,27 +441,22 @@ class KtiseosNyxPlayer(QWidget):
             # Mute: Store current volume and set to 0
             self.previous_volume = self.volume
             self.volume = 0.0
-            self.volume_slider.setValue(0)  # Update the slider visually
+            self.volume_slider.setValue(0)
             self.mute_button.setIcon(qtawesome.icon('mdi.volume-off'))
-            self.mute_button.setToolTip("Unmute")  # Update tooltip
+            self.mute_button.setToolTip("Unmute")
             logging.debug("Muted")
         else:
             # Unmute: Restore previous volume
             self.volume = self.previous_volume
-            self.volume_slider.setValue(int(self.volume * 100))  # Update the slider
+            self.volume_slider.setValue(int(self.volume * 100))
             self.mute_button.setIcon(qtawesome.icon('mdi.volume-high'))
-            self.mute_button.setToolTip("Mute") # Update tooltip
+            self.mute_button.setToolTip("Mute")
             logging.debug("Unmuted")
         self.update_volume_display()
-        if self.current_sound and self.current_sound.active: #Refresh if playing
-            self.play_current_track()
-
-
+        #No need to refresh if using pyaudio
 
     def update_volume_display(self):
-        """Updates the volume label with the current volume percentage."""
         self.volume_label.setText(f"{int(self.volume * 100)}%")
-
 
     def update_status_label(self):
         if self.current_sound and self.playlist:
@@ -475,86 +467,58 @@ class KtiseosNyxPlayer(QWidget):
         else:
             self.status_label.setText("Stopped")
 
-
     def check_playback_status(self):
-        if self.current_sound:
-             if not self.current_sound.active:
-                if self.repeat_mode == "one":
-                    self.play_current_track()
-                elif self.repeat_mode == "all":
-                    self.current_track_index = (self.current_track_index + 1) % len(self.playlist)
-                    self.play_current_track()
-                elif self.repeat_mode == 'off':
-                    self.current_track_index = (self.current_track_index + 1) % len(self.playlist)
-                    if self.current_track_index != 0:
-                        self.play_current_track()
-                    else:
-                        self.stop()
+        # pyaudio handles end of stream, so we don't need this function anymore
+        pass
 
-                elif not self.playlist:
-                    self.current_sound = None
-        #Removed recursive call
-
-    def audio_callback(self, outdata, frames, time, status):
+    def audio_callback(self, in_data, frame_count, time_info, status):
         if status:
-            logging.warning(f"Sounddevice status: {status}")
+            logging.warning(f"PyAudio status: {status}")
+            return (b'', pyaudio.paComplete)
 
-        chunksize = min(len(self.current_data) - self.current_frame, frames)
-        outdata[:chunksize] = self.current_data[self.current_frame:self.current_frame + chunksize]
+        # Calculate the start and end byte indices for this chunk
+        start_byte = self.current_frame * self.channels * 2  # 2 bytes per sample (int16)
+        end_byte = start_byte + frame_count * self.channels * 2
 
-        if chunksize < frames:
-            outdata[chunksize:] = 0
-            self.stop()
-            raise sd.CallbackStop()
+        # Check if we've reached the end of the data
+        if start_byte >= len(self.current_data):
+            if self.repeat_mode == "one":
+                self.current_frame = 0 # Replay
+                return self.audio_callback(in_data, frame_count, time_info, status)
+            elif self.repeat_mode == "all":
+                self.next_track() # Loops to next track
+                raise sd.CallbackStop()
+            elif self.repeat_mode == "off":
+                self.current_track_index = (self.current_track_index + 1) % len(self.playlist)
+                if self.current_track_index != 0:
+                   self.play_current_track() # Next track
+                else:
+                    self.stop() # End
+                raise sd.CallbackStop() #Stop callback when done.
+            else:  # Handle edge case
+                self.stop()
+                return (b'', pyaudio.paComplete)
 
-        self.current_frame += chunksize
-        #NO VOLUME SCALING
+        # Extract the chunk of audio data
+        data = self.current_data[start_byte:end_byte]
+        self.current_frame += frame_count
 
-async def load_audio_file_async(file_path):
-    logging.debug(f"load_audio_file_async: Loading {file_path}")
-    try:
-        async with aiofiles.open(file_path, 'rb') as f:
-            file_data = await f.read()
-            logging.debug(f"load_audio_file_async: Read file data, size: {len(file_data)}")
-            audio = AudioSegment.from_file(io.BytesIO(file_data), format=file_path.split('.')[-1])
-            logging.debug(f"load_audio_file_async: AudioSegment created successfully")
+        # Pad with zeros if we're near the end of the data
+        if len(data) < frame_count * self.channels * 2:
+            pad_size = frame_count * self.channels * 2 - len(data)
+            data += b'\x00' * pad_size  # Zero-padding
 
-            # --- CRITICAL FIX: Convert to 16-bit PCM here ---
-            audio = audio.set_sample_width(2)
-            return audio
+         # Apply Volume
+        if self.volume != 1.0:  # Avoid unnecessary processing if volume is 1.0
+                # Convert bytes to NumPy array for scaling
+                np_data = np.frombuffer(data, dtype=np.int16)
+                # Scale the data
+                np_data = (np_data * self.volume).astype(np.int16)
+                # Convert back to bytes
+                data = np_data.tobytes()
 
-    except Exception as e:
-        logging.exception(f"load_audio_file_async: Exception: {e}")
-        raise
+        return (data, pyaudio.paContinue)
 
-def play_audio(self, audio_segment, volume=1.0):
-    try:
-        sr = audio_segment.frame_rate
-        samples = audio_segment.get_array_of_samples()
-        samples = np.array(samples).astype(np.int16)
-        channels = audio_segment.channels
-        data = samples.reshape(-1, channels)
-
-        # --- Normalize to -1.0 to 1.0 (float) ---
-        data = data.astype(np.float32) / 32768.0
-        # --- Apply Volume ---
-        data *= self.volume  # Use the instance volume
-        # --- Clamp and Convert back to int16 ---
-        data = np.clip(data * 32767.0, -32768.0, 32767.0).astype(np.int16)
-
-        stream = sd.OutputStream(
-            samplerate=sr,
-            channels=channels,
-            callback=self.audio_callback,
-            blocksize=1024,
-            )
-        stream.start()
-
-        return stream, data, sr
-
-    except Exception as e:
-        logging.exception(f"Error during playback setup: {e}")
-        return None, None, None
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
